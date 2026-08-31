@@ -1,0 +1,17 @@
+<Application x:Class="DualRecorder.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             StartupUri="MainWindow.xaml"
+             ShutdownMode="OnMainWindowClose">
+    <Application.Resources>
+        <Style TargetType="Label">
+            <Setter Property="Padding" Value="0,0,0,2"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+        <Style TargetType="Button">
+            <Setter Property="Padding" Value="18,7"/>
+            <Setter Property="MinWidth" Value="92"/>
+            <Setter Property="Margin" Value="0,0,8,0"/>
+        </Style>
+    </Application.Resources>
+</Application>
