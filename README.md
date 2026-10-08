@@ -1,5 +1,34 @@
 # Dual Recorder
 
+## Live transcription and speaker corrections
+
+DualRecorder shows an English transcript while recording microphone and computer audio. Recognition and voice matching run locally on the PC.
+
+1. Select the microphone, the computer audio output used by Teams, and the recording folder. Enable **Transcribe while recording**. Speech files are bundled or downloaded once by **Set up speech files** (about 104 MB).
+2. For a Teams call, keep **Only me on the microphone** checked when the microphone contains only your own voice. Several people sharing one microphone need that checkbox unticked.
+3. Press **Start**. The **People in this recording** table lists the voice labels. Edit any number of names and click **Apply names**. New live text retains the table rows, pending names and selected person.
+4. If the automatic detector missed a person, enter their name and click **Add person**. Select one or more finished transcript lines, choose the person, and click **Assign speaker**. A sufficiently long line without overlapping voices supplies a local voice reference for the remainder of this recording.
+5. Double-click the **Words** cell of a finished line to correct text. Press **Stop** to finish pending speech and save `_transcript.txt` and `_transcript.json` beside the three audio files. **Load transcript** reopens the JSON file from an earlier recording for speaker and word corrections; edits update the saved transcript.
+
+Live words and speaker labels are provisional. Names apply to the current recording. Short or ambiguous speech remains marked **Unknown speaker** or **Check speaker**. Audio from simultaneous speakers within one track can be incomplete. Separate microphone and computer-audio speech retain their timestamps and overlaps.
+
+The app uses the public English Kroko streaming Zipformer model, Pyannote segmentation and WeSpeaker embeddings through [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx). Model files and SHA-256 hashes are pinned. The updated English model retains quieter-speech phrases that the original model missed in the public test fixture. This is a fixture result, not a guarantee that every meeting word or voice is correct.
+
+Voice references stay in memory for the recording; audio and voice embeddings are not uploaded. Public model downloads are the only network activity in the transcription component. Speech files are stored in `%LOCALAPPDATA%\DualRecorder\models\live-en-v2` or the `models` folder beside the executable. No Python, GPU, API key or subscription is required.
+
+Transcription reads growing WAV files on a separate worker. Audio capture continues if recognition falls behind. Pause boundaries use recorded sample positions, so a quick resume cannot erase a pause while recognition catches up. Distinct voices in the same diarization result cannot be collapsed to one global identity.
+
+### Verification
+
+```powershell
+dotnet build DualRecorder/src/DualRecorder/DualRecorder.csproj -c Release
+dotnet run --project DualRecorder/tests/CoreTests -c Release
+pwsh ./DualRecorder/tests/TranscriptionTests/Fetch-TestModels.ps1 -Destination ./speech-test-models
+dotnet run --project DualRecorder/tests/TranscriptionTests -c Release -- ./speech-test-models ./speech-test-output
+```
+
+The Windows build, original recording checks and 36 transcription checks passed locally. Regression coverage includes naming a second person after the first across repeated live updates, adding a missed person, voice references, line reassignment, word editing and saved-transcript reload. Public audio verifies both speaker labels before Stop, quieter speech, final-word retention, pause timing and unchanged source audio. Teams participant names are assigned by the user; the recorder receives the call's combined audio stream.
+
 Records your microphone and your speakers at the same time, into separate files plus a combined one.
 
 ## How to run it (for someone who does not write code)
@@ -75,7 +104,3 @@ It simulates 10 second recordings and asserts, by reading the finished files bac
 - out of range and NaN samples are clamped rather than wrapping to loud noise
 
 All of those pass. `tests/AudioCompileCheck` compiles the whole audio layer against a small stand-in for the NAudio API so it can be type checked without NuGet access.
-
-## What has not been run
-
-The WPF and NAudio parts have not been compiled or run, because this was built in a Linux sandbox with no NuGet access and no Windows. The core timing, mixing and file writing logic is tested as described above, and the audio layer is type checked against stub interfaces, but the first real `dotnet publish` is on your machine.

@@ -11,6 +11,9 @@ namespace DualRecorder
         public string RenderDeviceId { get; set; }
         public string OutputFolder { get; set; }
         public bool ExportMp3 { get; set; }
+        public bool LiveTranscription { get; set; } = true;
+        public bool MicrophoneIsOnlyMe { get; set; } = true;
+        public string MicrophoneName { get; set; } = "You";
         public int Mp3BitRate { get; set; } = 192;
 
         private static string FilePath
