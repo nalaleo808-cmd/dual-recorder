@@ -1,5 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.Linq;
+using System.Threading;
+using DualRecorder.Transcription;
 using System.Diagnostics;
 using System.IO;
 using System.Threading.Tasks;
@@ -16,7 +20,8 @@ namespace DualRecorder
         private readonly RecordingEngine _engine = new RecordingEngine();
         private readonly GlobalHotkey _hotkey = new GlobalHotkey();
         private readonly DispatcherTimer _ui = new DispatcherTimer();
-        private readonly Settings _settings = Settings.Load();
+        private readonly Settings _settings;
+        private readonly bool _preview;
 
         private WinForms.NotifyIcon _tray;
         private double _micLevel, _sysLevel;
@@ -24,9 +29,18 @@ namespace DualRecorder
 
         private const uint VK_R = 0x52;
 
-        public MainWindow()
+        public MainWindow() : this(false) { }
+
+        public MainWindow(bool preview)
         {
+            _preview = preview;
+            _settings = preview ? new Settings { OutputFolder = "Recordings", MicrophoneName = "You" } : Settings.Load();
             InitializeComponent();
+            TranscriptCheck.IsChecked = _settings.LiveTranscription;
+            OnlyMeCheck.IsChecked = _settings.MicrophoneIsOnlyMe;
+            MicrophoneNameBox.Text = _settings.MicrophoneName;
+            TranscriptList.ItemsSource = _transcriptRows;
+            if (SpeechModels.Available) TranscriptStatus.Text = "Speech files are ready. Start recording to see your transcript.";
 
             FolderBox.Text = _settings.OutputFolder;
             Mp3Check.IsChecked = _settings.ExportMp3;
@@ -36,17 +50,126 @@ namespace DualRecorder
 
             _ui.Interval = TimeSpan.FromMilliseconds(50);
             _ui.Tick += OnUiTick;
-            _ui.Start();
+            if (!preview) _ui.Start();
 
             Loaded += OnLoaded;
             Closing += OnClosing;
             StateChanged += OnStateChanged;
         }
 
+        private readonly ObservableCollection<TranscriptEntry> _transcriptRows = new ObservableCollection<TranscriptEntry>();
+        private LiveTranscriptionSession _transcription;
+        private bool _finishingTranscript, _settingUpSpeech, _closingAfterTranscription;
+
+        private async void ModelsButton_Click(object sender, RoutedEventArgs e)
+        {
+            _settingUpSpeech = true;
+            UpdateButtons();
+            try
+            {
+                await SpeechModels.DownloadAsync(new Progress<string>(text => TranscriptStatus.Text = text), CancellationToken.None);
+                SaveSettings();
+            }
+            catch (Exception ex) { TranscriptStatus.Text = "Speech setup failed: " + ex.Message + ". You can still record audio."; }
+            finally { _settingUpSpeech = false; UpdateButtons(); }
+        }
+
+        private void BeginTranscription(RecordingResult recording)
+        {
+            _transcription = null;
+            _transcriptRows.Clear();
+            SpeakerCombo.ItemsSource = null;
+            SaveTranscriptButton.IsEnabled = false;
+            OpenTranscriptButton.IsEnabled = false;
+            if (TranscriptCheck.IsChecked != true) { TranscriptStatus.Text = "Transcription is off for this recording."; return; }
+            if (!SpeechModels.Available) { TranscriptStatus.Text = "Recording audio. Set up speech files before the next recording to enable live transcription."; return; }
+            var session = new LiveTranscriptionSession(recording.MicPath, recording.SystemPath, SpeechModels.Folder,
+                MicrophoneNameBox.Text, OnlyMeCheck.IsChecked == true);
+            _transcription = session;
+            session.Updated += update => Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (_transcription != session) return;
+                var removed = _transcriptRows.FirstOrDefault(x => x.Id == update.RemoveId);
+                if (removed != null) _transcriptRows.Remove(removed);
+                foreach (var entry in update.Entries)
+                {
+                    int at = 0;
+                    while (at < _transcriptRows.Count && _transcriptRows[at].Start <= entry.Start) at++;
+                    _transcriptRows.Insert(at, entry);
+                }
+                string selected = SpeakerCombo.SelectedValue as string;
+                SpeakerCombo.ItemsSource = session.Speakers.Identities;
+                if (selected != null) SpeakerCombo.SelectedValue = selected;
+                else if (SpeakerCombo.Items.Count > 0) SpeakerCombo.SelectedIndex = 0;
+                SaveTranscriptButton.IsEnabled = true;
+                if (_transcriptRows.Count > 0) TranscriptList.ScrollIntoView(_transcriptRows[_transcriptRows.Count - 1]);
+            }));
+            session.StatusChanged += status => Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (_transcription == session) TranscriptStatus.Text = status;
+                if (status.StartsWith("Transcription stopped:", StringComparison.Ordinal)) Log(status);
+            }));
+            session.Start();
+        }
+
+        private async void FinishTranscription()
+        {
+            var session = _transcription;
+            if (session == null) return;
+            _finishingTranscript = true;
+            UpdateButtons();
+            session.RequestStop();
+            await session.Completion;
+            _finishingTranscript = false;
+            if (_transcription == session)
+            {
+                SaveTranscriptButton.IsEnabled = true;
+                OpenTranscriptButton.IsEnabled = File.Exists(session.TranscriptPath);
+            }
+            UpdateButtons();
+        }
+
+        private void RenameSpeaker_Click(object sender, RoutedEventArgs e)
+        {
+            var selected = SpeakerCombo.SelectedItem as SpeakerIdentity;
+            if (_transcription == null || selected == null) { TranscriptStatus.Text = "Choose a detected speaker first."; return; }
+            try
+            {
+                _transcription.Speakers.Rename(selected.Id, SpeakerNameBox.Text);
+                foreach (var row in _transcriptRows.Where(x => x.SpeakerId == selected.Id))
+                    row.SpeakerName = _transcription.Speakers.Name(selected.Id);
+                SpeakerCombo.ItemsSource = _transcription.Speakers.Identities;
+                SpeakerCombo.SelectedValue = selected.Id;
+                if (_transcription.Finished) _transcription.Save();
+                TranscriptStatus.Text = "Speaker renamed to " + _transcription.Speakers.Name(selected.Id) + ".";
+                SpeakerNameBox.Clear();
+            }
+            catch (Exception ex) { TranscriptStatus.Text = ex.Message; }
+        }
+
+        private void SaveTranscript_Click(object sender, RoutedEventArgs e)
+        {
+            if (_transcription == null) return;
+            try
+            {
+                _transcription.Save();
+                OpenTranscriptButton.IsEnabled = true;
+                TranscriptStatus.Text = "Transcript saved: " + _transcription.TranscriptPath;
+            }
+            catch (Exception ex) { TranscriptStatus.Text = "Could not save the transcript: " + ex.Message; }
+        }
+
+        private void OpenTranscript_Click(object sender, RoutedEventArgs e)
+        {
+            if (_transcription == null || !File.Exists(_transcription.TranscriptPath)) return;
+            try { Process.Start(new ProcessStartInfo(_transcription.TranscriptPath) { UseShellExecute = true }); }
+            catch (Exception ex) { TranscriptStatus.Text = "Could not open the transcript: " + ex.Message; }
+        }
         // ---------- startup ----------
 
         private void OnLoaded(object sender, RoutedEventArgs e)
         {
+            if (_preview) return;
             LoadDevices();
             SetUpTray();
 
@@ -152,6 +275,7 @@ namespace DualRecorder
             if (_engine.State == RecorderState.Recording)
             {
                 _engine.Pause();
+                _transcription?.SetPaused(true);
                 PauseButton.Content = "Resume";
                 StateText.Text = "Paused";
                 Log("Paused.");
@@ -159,6 +283,7 @@ namespace DualRecorder
             else if (_engine.State == RecorderState.Paused)
             {
                 _engine.Resume();
+                _transcription?.SetPaused(false);
                 PauseButton.Content = "Pause";
                 StateText.Text = "Recording";
                 Log("Resumed.");
@@ -168,7 +293,7 @@ namespace DualRecorder
 
         private void StartRecording()
         {
-            if (_engine.State != RecorderState.Idle) return;
+            if (_engine.State != RecorderState.Idle || _finishingTranscript || _settingUpSpeech) return;
 
             string folder = FolderBox.Text.Trim();
             if (string.IsNullOrEmpty(folder))
@@ -191,6 +316,7 @@ namespace DualRecorder
             {
                 var r = _engine.Start(mic?.Id, sys?.Id, folder);
                 foreach (var w in r.Warnings) Log(w);
+                BeginTranscription(r);
                 Log("Recording to " + folder);
                 StateText.Text = "Recording";
                 PauseButton.Content = "Pause";
@@ -230,6 +356,7 @@ namespace DualRecorder
             foreach (var w in r.Warnings) Log("   " + w);
 
             if (Mp3Check.IsChecked == true) ExportMp3(r);
+            FinishTranscription();
             SaveSettings();
         }
 
@@ -294,7 +421,11 @@ namespace DualRecorder
         private void UpdateButtons()
         {
             bool idle = _engine.State == RecorderState.Idle;
-            StartButton.IsEnabled = idle;
+            StartButton.IsEnabled = idle && !_finishingTranscript && !_settingUpSpeech;
+            TranscriptCheck.IsEnabled = idle && !_finishingTranscript;
+            OnlyMeCheck.IsEnabled = idle && !_finishingTranscript;
+            MicrophoneNameBox.IsEnabled = idle && !_finishingTranscript;
+            ModelsButton.IsEnabled = idle && !_finishingTranscript && !_settingUpSpeech;
             PauseButton.IsEnabled = !idle;
             StopButton.IsEnabled = !idle;
             MicCombo.IsEnabled = idle;
@@ -364,13 +495,17 @@ namespace DualRecorder
             _settings.RenderDeviceId = sys?.Id;
             _settings.OutputFolder = FolderBox.Text;
             _settings.ExportMp3 = Mp3Check.IsChecked == true;
+            _settings.LiveTranscription = TranscriptCheck.IsChecked == true;
+            _settings.MicrophoneIsOnlyMe = OnlyMeCheck.IsChecked == true;
+            _settings.MicrophoneName = MicrophoneNameBox.Text.Trim();
             _settings.Mp3BitRate = SelectedBitrate();
             _settings.Save();
         }
 
-        private void OnClosing(object sender, System.ComponentModel.CancelEventArgs e)
+        private async void OnClosing(object sender, System.ComponentModel.CancelEventArgs e)
         {
-            if (_shuttingDown) return;
+            if (_shuttingDown || _preview) return;
+            if (_closingAfterTranscription) { e.Cancel = true; return; }
 
             if (_engine.State != RecorderState.Idle)
             {
@@ -379,9 +514,26 @@ namespace DualRecorder
                     "Dual Recorder", MessageBoxButton.YesNoCancel, MessageBoxImage.Question);
                 if (answer == MessageBoxResult.Cancel) { e.Cancel = true; return; }
                 if (answer == MessageBoxResult.Yes) StopRecording();
-                else { try { _engine.Stop(); } catch { } }
+                else { try { _engine.Stop(); } catch { } FinishTranscription(); }
             }
 
+            if (_transcription != null && !_transcription.Completion.IsCompleted)
+            {
+                e.Cancel = true;
+                _closingAfterTranscription = true;
+                _transcription.RequestStop();
+                TranscriptStatus.Text = "Saving the last transcript sections before closing...";
+                await _transcription.Completion;
+                _closingAfterTranscription = false;
+                _shuttingDown = true;
+                SaveSettings();
+                _ui.Stop();
+                try { _hotkey.Dispose(); } catch { }
+                try { _engine.Dispose(); } catch { }
+                if (_tray != null) { try { _tray.Visible = false; _tray.Dispose(); } catch { } _tray = null; }
+                Close();
+                return;
+            }
             _shuttingDown = true;
             SaveSettings();
             _ui.Stop();

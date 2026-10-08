@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
@@ -21,6 +24,18 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
+
+      - name: Check recording synchronization and recovery
+        shell: pwsh
+        run: dotnet run --project DualRecorder/tests/CoreTests -c Release
+
+      - name: Download public speech test fixtures
+        shell: pwsh
+        run: ./DualRecorder/tests/TranscriptionTests/Fetch-TestModels.ps1 -Destination "${{ runner.temp }}/dual-recorder-models"
+
+      - name: Check live transcription and speaker labels
+        shell: pwsh
+        run: dotnet run --project DualRecorder/tests/TranscriptionTests -c Release -- "${{ runner.temp }}/dual-recorder-models" "${{ runner.temp }}/dual-recorder-tests"
 
       - name: Publish self-contained Windows executable
         shell: pwsh

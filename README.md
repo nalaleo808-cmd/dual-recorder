@@ -1,5 +1,42 @@
 # Dual Recorder
 
+## Live transcription and speaker labels
+
+DualRecorder shows an English transcript while it records. Speech recognition and speaker detection run locally on your PC. Recording audio is never uploaded to a transcription service.
+
+1. Start the app. If speech files are not installed, click **Set up speech files** once. The download is about 106 MB and is verified before use.
+2. Select your microphone, speakers and recording folder. Enable **Transcribe while recording**.
+3. Keep **Only me on the microphone** checked when that microphone contains just your voice. Enter your name beside it. Untick it when several people share the room microphone.
+4. Press **Start**. Words appear as live drafts. Short speech sections are analyzed to assign **Speaker 1**, **Speaker 2** and other labels. Select a detected speaker, type the person's name and press **Rename** to update that speaker's lines.
+5. Press **Stop**. Pending speech is finished and `_transcript.txt` and `_transcript.json` are saved beside the three audio files. Renaming speakers after stopping updates the saved transcript too.
+
+Live words and speaker labels can change. Names are assigned by you and apply to the current recording. Short speech and uncertain voice matches use **Unknown speaker**. Simultaneous voices within one audio track use **Overlapping voices**; recognition of overlapping words may be incomplete. Separate microphone and computer-audio speech retain their timestamps and overlaps.
+
+Public model files are downloaded only during setup. They are stored in `%LOCALAPPDATA%\DualRecorder\models\live-en-v1`, or loaded from the `models` folder beside the executable. No Python installation, GPU, API key or transcription subscription is required. The initial model supports English.
+
+Transcription follows the growing audio files on a separate worker. Slow recognition cannot block capture. It catches up after Stop and displays a warning if it falls behind. Paused time is excluded from transcript timestamps. Transcription failures are reported separately from audio recording. The original audio engine and its synchronization and crash-recovery rules are retained.
+
+### Verify the upgrade
+
+Build the Windows app and run the original recording tests:
+
+```powershell
+dotnet build DualRecorder/src/DualRecorder/DualRecorder.csproj -c Release
+dotnet run --project DualRecorder/tests/CoreTests -c Release
+```
+
+Run the transcription checks, including public-audio streaming and two-speaker fixtures:
+
+```powershell
+pwsh ./DualRecorder/tests/TranscriptionTests/Fetch-TestModels.ps1 -Destination ./speech-test-models
+dotnet run --project DualRecorder/tests/TranscriptionTests -c Release -- ./speech-test-models ./speech-test-output
+```
+
+The Windows build, 27 transcription checks and original recording checks have been run locally. Checks cover live updates before Stop, two speaker identities, final-word retention, pause/resume timing, renaming, overlapping source ordering, model integrity and byte-identical source audio. A short trial with the actual microphone and call setup remains useful before relying on meeting transcripts.
+
+Speech components use [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), a streaming English Zipformer model, Pyannote segmentation and WeSpeaker embeddings. Model versions and hashes are pinned in `SpeechModels.cs`.
+
+
 Records your microphone and your speakers at the same time, into separate files plus a combined one.
 
 ## How to run it (for someone who does not write code)
@@ -75,7 +112,3 @@ It simulates 10 second recordings and asserts, by reading the finished files bac
 - out of range and NaN samples are clamped rather than wrapping to loud noise
 
 All of those pass. `tests/AudioCompileCheck` compiles the whole audio layer against a small stand-in for the NAudio API so it can be type checked without NuGet access.
-
-## What has not been run
-
-The WPF and NAudio parts have not been compiled or run, because this was built in a Linux sandbox with no NuGet access and no Windows. The core timing, mixing and file writing logic is tested as described above, and the audio layer is type checked against stub interfaces, but the first real `dotnet publish` is on your machine.
