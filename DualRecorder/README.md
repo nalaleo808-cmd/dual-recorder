@@ -1,41 +1,33 @@
 # Dual Recorder
 
-## Live transcription and speaker labels
+## Live transcription and speaker corrections
 
-DualRecorder shows an English transcript while it records. Speech recognition and speaker detection run locally on your PC. Recording audio is never uploaded to a transcription service.
+DualRecorder shows an English transcript while recording microphone and computer audio. Recognition and voice matching run locally on the PC.
 
-1. Start the app. If speech files are not installed, click **Set up speech files** once. The download is about 106 MB and is verified before use.
-2. Select your microphone, speakers and recording folder. Enable **Transcribe while recording**.
-3. Keep **Only me on the microphone** checked when that microphone contains just your voice. Enter your name beside it. Untick it when several people share the room microphone.
-4. Press **Start**. Words appear as live drafts. Short speech sections are analyzed to assign **Speaker 1**, **Speaker 2** and other labels. Select a detected speaker, type the person's name and press **Rename** to update that speaker's lines.
-5. Press **Stop**. Pending speech is finished and `_transcript.txt` and `_transcript.json` are saved beside the three audio files. Renaming speakers after stopping updates the saved transcript too.
+1. Select the microphone, the computer audio output used by Teams, and the recording folder. Enable **Transcribe while recording**. Speech files are bundled or downloaded once by **Set up speech files** (about 104 MB).
+2. For a Teams call, keep **Only me on the microphone** checked when the microphone contains only your own voice. Several people sharing one microphone need that checkbox unticked.
+3. Press **Start**. The **People in this recording** table lists the voice labels. Edit any number of names and click **Apply names**. New live text retains the table rows, pending names and selected person.
+4. If the automatic detector missed a person, enter their name and click **Add person**. Select one or more finished transcript lines, choose the person, and click **Assign speaker**. A sufficiently long line without overlapping voices supplies a local voice reference for the remainder of this recording.
+5. Double-click the **Words** cell of a finished line to correct text. Press **Stop** to finish pending speech and save `_transcript.txt` and `_transcript.json` beside the three audio files. **Load transcript** reopens the JSON file from an earlier recording for speaker and word corrections; edits update the saved transcript.
 
-Live words and speaker labels can change. Names are assigned by you and apply to the current recording. Short speech and uncertain voice matches use **Unknown speaker**. Simultaneous voices within one audio track use **Overlapping voices**; recognition of overlapping words may be incomplete. Separate microphone and computer-audio speech retain their timestamps and overlaps.
+Live words and speaker labels are provisional. Names apply to the current recording. Short or ambiguous speech remains marked **Unknown speaker** or **Check speaker**. Audio from simultaneous speakers within one track can be incomplete. Separate microphone and computer-audio speech retain their timestamps and overlaps.
 
-Public model files are downloaded only during setup. They are stored in `%LOCALAPPDATA%\DualRecorder\models\live-en-v1`, or loaded from the `models` folder beside the executable. No Python installation, GPU, API key or transcription subscription is required. The initial model supports English.
+The app uses the public English Kroko streaming Zipformer model, Pyannote segmentation and WeSpeaker embeddings through [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx). Model files and SHA-256 hashes are pinned. The updated English model retains quieter-speech phrases that the original model missed in the public test fixture. This is a fixture result, not a guarantee that every meeting word or voice is correct.
 
-Transcription follows the growing audio files on a separate worker. Slow recognition cannot block capture. It catches up after Stop and displays a warning if it falls behind. Paused time is excluded from transcript timestamps. Transcription failures are reported separately from audio recording. The original audio engine and its synchronization and crash-recovery rules are retained.
+Voice references stay in memory for the recording; audio and voice embeddings are not uploaded. Public model downloads are the only network activity in the transcription component. Speech files are stored in `%LOCALAPPDATA%\DualRecorder\models\live-en-v2` or the `models` folder beside the executable. No Python, GPU, API key or subscription is required.
 
-### Verify the upgrade
+Transcription reads growing WAV files on a separate worker. Audio capture continues if recognition falls behind. Pause boundaries use recorded sample positions, so a quick resume cannot erase a pause while recognition catches up. Distinct voices in the same diarization result cannot be collapsed to one global identity.
 
-Build the Windows app and run the original recording tests:
+### Verification
 
 ```powershell
 dotnet build DualRecorder/src/DualRecorder/DualRecorder.csproj -c Release
 dotnet run --project DualRecorder/tests/CoreTests -c Release
-```
-
-Run the transcription checks, including public-audio streaming and two-speaker fixtures:
-
-```powershell
 pwsh ./DualRecorder/tests/TranscriptionTests/Fetch-TestModels.ps1 -Destination ./speech-test-models
 dotnet run --project DualRecorder/tests/TranscriptionTests -c Release -- ./speech-test-models ./speech-test-output
 ```
 
-The Windows build, 27 transcription checks and original recording checks have been run locally. Checks cover live updates before Stop, two speaker identities, final-word retention, pause/resume timing, renaming, overlapping source ordering, model integrity and byte-identical source audio. A short trial with the actual microphone and call setup remains useful before relying on meeting transcripts.
-
-Speech components use [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx), a streaming English Zipformer model, Pyannote segmentation and WeSpeaker embeddings. Model versions and hashes are pinned in `SpeechModels.cs`.
-
+The Windows build, original recording checks and 36 transcription checks passed locally. Regression coverage includes naming a second person after the first across repeated live updates, adding a missed person, voice references, line reassignment, word editing and saved-transcript reload. Public audio verifies both speaker labels before Stop, quieter speech, final-word retention, pause timing and unchanged source audio. Teams participant names are assigned by the user; the recorder receives the call's combined audio stream.
 
 Records your microphone and your speakers at the same time, into separate files plus a combined one.
 

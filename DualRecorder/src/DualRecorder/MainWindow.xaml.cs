@@ -40,6 +40,8 @@ namespace DualRecorder
             OnlyMeCheck.IsChecked = _settings.MicrophoneIsOnlyMe;
             MicrophoneNameBox.Text = _settings.MicrophoneName;
             TranscriptList.ItemsSource = _transcriptRows;
+            SpeakerGrid.ItemsSource = _speakerRows;
+            SpeakerAssignCombo.ItemsSource = _speakerRows;
             if (SpeechModels.Available) TranscriptStatus.Text = "Speech files are ready. Start recording to see your transcript.";
 
             FolderBox.Text = _settings.OutputFolder;
@@ -58,6 +60,7 @@ namespace DualRecorder
         }
 
         private readonly ObservableCollection<TranscriptEntry> _transcriptRows = new ObservableCollection<TranscriptEntry>();
+        private readonly ObservableCollection<SpeakerIdentity> _speakerRows = new ObservableCollection<SpeakerIdentity>();
         private LiveTranscriptionSession _transcription;
         private bool _finishingTranscript, _settingUpSpeech, _closingAfterTranscription;
 
@@ -78,7 +81,7 @@ namespace DualRecorder
         {
             _transcription = null;
             _transcriptRows.Clear();
-            SpeakerCombo.ItemsSource = null;
+            _speakerRows.Clear();
             SaveTranscriptButton.IsEnabled = false;
             OpenTranscriptButton.IsEnabled = false;
             if (TranscriptCheck.IsChecked != true) { TranscriptStatus.Text = "Transcription is off for this recording."; return; }
@@ -97,12 +100,9 @@ namespace DualRecorder
                     while (at < _transcriptRows.Count && _transcriptRows[at].Start <= entry.Start) at++;
                     _transcriptRows.Insert(at, entry);
                 }
-                string selected = SpeakerCombo.SelectedValue as string;
-                SpeakerCombo.ItemsSource = session.Speakers.Identities;
-                if (selected != null) SpeakerCombo.SelectedValue = selected;
-                else if (SpeakerCombo.Items.Count > 0) SpeakerCombo.SelectedIndex = 0;
+                RefreshSpeakerRows(session.Speakers);
                 SaveTranscriptButton.IsEnabled = true;
-                if (_transcriptRows.Count > 0) TranscriptList.ScrollIntoView(_transcriptRows[_transcriptRows.Count - 1]);
+                if (!TranscriptList.IsKeyboardFocusWithin && _transcriptRows.Count > 0) TranscriptList.ScrollIntoView(_transcriptRows[_transcriptRows.Count - 1]);
             }));
             session.StatusChanged += status => Dispatcher.BeginInvoke(new Action(() =>
             {
@@ -129,29 +129,105 @@ namespace DualRecorder
             UpdateButtons();
         }
 
-        private void RenameSpeaker_Click(object sender, RoutedEventArgs e)
+        public void RefreshSpeakerRows(SpeakerRegistry speakers)
         {
-            var selected = SpeakerCombo.SelectedItem as SpeakerIdentity;
-            if (_transcription == null || selected == null) { TranscriptStatus.Text = "Choose a detected speaker first."; return; }
+            foreach (var identity in speakers.Identities)
+                if (!_speakerRows.Any(x => x.Id == identity.Id)) _speakerRows.Add(identity);
+            if (SpeakerAssignCombo.SelectedIndex < 0 && _speakerRows.Count > 0) SpeakerAssignCombo.SelectedIndex = 0;
+        }
+        private void CommitSpeakerNames()
+        {
+            SpeakerGrid.CommitEdit(System.Windows.Controls.DataGridEditingUnit.Cell, true);
+            SpeakerGrid.CommitEdit(System.Windows.Controls.DataGridEditingUnit.Row, true);
+            if (_transcription == null) return;
+            foreach (var person in _speakerRows) _transcription.Speakers.Rename(person.Id, person.Name);
+            foreach (var row in _transcriptRows.Where(x => x.IsFinal)) row.SpeakerName = _transcription.Speakers.Name(row.SpeakerId);
+            if (_transcription.Finished) _transcription.Save();
+        }
+        private void ApplySpeakerNames_Click(object sender, RoutedEventArgs e)
+        {
+            try { CommitSpeakerNames(); TranscriptStatus.Text = "Speaker names applied throughout this recording."; }
+            catch (Exception ex) { TranscriptStatus.Text = ex.Message; }
+        }
+        private void AddSpeaker_Click(object sender, RoutedEventArgs e)
+        {
+            if (_transcription == null) { TranscriptStatus.Text = "Start a recording before adding a person."; return; }
             try
             {
-                _transcription.Speakers.Rename(selected.Id, SpeakerNameBox.Text);
-                foreach (var row in _transcriptRows.Where(x => x.SpeakerId == selected.Id))
-                    row.SpeakerName = _transcription.Speakers.Name(selected.Id);
-                SpeakerCombo.ItemsSource = _transcription.Speakers.Identities;
-                SpeakerCombo.SelectedValue = selected.Id;
+                CommitSpeakerNames();
+                string id = _transcription.Speakers.AddPerson(NewSpeakerNameBox.Text);
+                RefreshSpeakerRows(_transcription.Speakers);
+                SpeakerAssignCombo.SelectedValue = id;
+                NewSpeakerNameBox.Clear();
                 if (_transcription.Finished) _transcription.Save();
-                TranscriptStatus.Text = "Speaker renamed to " + _transcription.Speakers.Name(selected.Id) + ".";
-                SpeakerNameBox.Clear();
+                TranscriptStatus.Text = "Person added. Select their transcript line and click Assign speaker to identify their voice.";
             }
             catch (Exception ex) { TranscriptStatus.Text = ex.Message; }
         }
+        private async void AssignSpeaker_Click(object sender, RoutedEventArgs e)
+        {
+            if (_transcription == null) return;
+            var session = _transcription;
+            var selected = SpeakerAssignCombo.SelectedItem as SpeakerIdentity;
+            var rows = TranscriptList.SelectedItems.Cast<TranscriptEntry>().Where(x => x.IsFinal).ToArray();
+            if (selected == null || rows.Length == 0) { TranscriptStatus.Text = "Select a finished transcript line and choose the person who said it."; return; }
+            try
+            {
+                CommitSpeakerNames();
+                var example = rows.Where(x => x.SpeakerId != SpeakerRegistry.OverlapId).OrderByDescending(x => x.End - x.Start).FirstOrDefault();
+                session.AssignSpeaker(rows.Select(x => x.Id), selected.Id);
+                TranscriptStatus.Text = "Speaker corrected. Learning from the selected line...";
+                bool learned = example != null && await session.LearnSpeakerAsync(example, selected.Id);
+                if (_transcription == session) TranscriptStatus.Text = learned
+                    ? "Speaker correction saved. The voice reference applies to this recording."
+                    : "Speaker corrected. Choose a longer line with one person speaking to help automatic voice matching.";
+            }
+            catch (Exception ex) { TranscriptStatus.Text = "Speaker correction: " + ex.Message; }
+        }
+        private void Transcript_BeginningEdit(object sender, System.Windows.Controls.DataGridBeginningEditEventArgs e)
+        {
+            if (e.Row.Item is TranscriptEntry row && !row.IsFinal) { e.Cancel = true; TranscriptStatus.Text = "Wait until this speech section is final before correcting its words."; }
+        }
+        private void Transcript_CellEditEnding(object sender, System.Windows.Controls.DataGridCellEditEndingEventArgs e)
+        {
+            if (e.EditAction != System.Windows.Controls.DataGridEditAction.Commit || _transcription == null) return;
+            var row = e.Row.Item as TranscriptEntry;
+            if (row != null) Dispatcher.BeginInvoke(new Action(() =>
+            {
+                try { _transcription.CorrectText(row.Id, row.Text); }
+                catch (Exception ex) { TranscriptStatus.Text = ex.Message; }
+            }), DispatcherPriority.Background);
+        }
 
+        private void LoadTranscript_Click(object sender, RoutedEventArgs e)
+        {
+            if (_engine.State != RecorderState.Idle || _finishingTranscript) return;
+            using var dialog = new WinForms.OpenFileDialog { Filter = "DualRecorder transcript|*_transcript.json", Title = "Open a saved transcript for corrections" };
+            if (Directory.Exists(FolderBox.Text)) dialog.InitialDirectory = FolderBox.Text;
+            if (dialog.ShowDialog() != WinForms.DialogResult.OK) return;
+            try
+            {
+                CommitSpeakerNames();
+                var session = LiveTranscriptionSession.LoadSaved(dialog.FileName, SpeechModels.Folder);
+                _transcription = session;
+                _transcriptRows.Clear();
+                _speakerRows.Clear();
+                foreach (var entry in session.Entries) _transcriptRows.Add(entry);
+                RefreshSpeakerRows(session.Speakers);
+                SaveTranscriptButton.IsEnabled = true;
+                OpenTranscriptButton.IsEnabled = File.Exists(session.TranscriptPath);
+                TranscriptStatus.Text = "Saved transcript loaded. You can name more people, assign their lines and correct words.";
+            }
+            catch (Exception ex) { TranscriptStatus.Text = "Could not load this transcript: " + ex.Message; }
+        }
         private void SaveTranscript_Click(object sender, RoutedEventArgs e)
         {
             if (_transcription == null) return;
             try
             {
+                CommitSpeakerNames();
+                TranscriptList.CommitEdit(System.Windows.Controls.DataGridEditingUnit.Cell, true);
+                TranscriptList.CommitEdit(System.Windows.Controls.DataGridEditingUnit.Row, true);
                 _transcription.Save();
                 OpenTranscriptButton.IsEnabled = true;
                 TranscriptStatus.Text = "Transcript saved: " + _transcription.TranscriptPath;
@@ -426,6 +502,7 @@ namespace DualRecorder
             OnlyMeCheck.IsEnabled = idle && !_finishingTranscript;
             MicrophoneNameBox.IsEnabled = idle && !_finishingTranscript;
             ModelsButton.IsEnabled = idle && !_finishingTranscript && !_settingUpSpeech;
+            LoadTranscriptButton.IsEnabled = idle && !_finishingTranscript;
             PauseButton.IsEnabled = !idle;
             StopButton.IsEnabled = !idle;
             MicCombo.IsEnabled = idle;

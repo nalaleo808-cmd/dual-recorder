@@ -21,11 +21,15 @@ namespace DualRecorder.Transcription
             get => _speakerName;
             set { _speakerName = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SpeakerName))); }
         }
-        public string Text { get; set; }
+        private string _text;
+        public string Text { get => _text; set { _text = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Text))); } }
+        private bool _edited;
+        public bool UserEdited { get => _edited; set { _edited = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Status))); } }
         public bool IsFinal { get; set; }
-        public bool NeedsReview { get; set; }
+        private bool _needsReview;
+        public bool NeedsReview { get => _needsReview; set { _needsReview = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Status))); } }
         public string Time => TimeSpan.FromSeconds(Math.Max(0, Start)).ToString(@"hh\:mm\:ss");
-        public string Status => !IsFinal ? "Live draft" : NeedsReview ? "Check speaker" : "Final";
+        public string Status => !IsFinal ? "Live draft" : NeedsReview ? "Check speaker" : UserEdited ? "Corrected" : "Final";
         public event PropertyChangedEventHandler PropertyChanged;
     }
 
@@ -42,7 +46,7 @@ namespace DualRecorder.Transcription
             var rows = entries.Where(x => x.IsFinal).OrderBy(x => x.Start).ThenBy(x => x.Source)
                 .Select(x => new TranscriptEntry { Id = x.Id, Start = x.Start, End = x.End, Source = x.Source,
                     SpeakerId = x.SpeakerId, SpeakerName = speakers.Name(x.SpeakerId), Text = x.Text,
-                    IsFinal = true, NeedsReview = x.NeedsReview }).ToArray();
+                    IsFinal = true, NeedsReview = x.NeedsReview, UserEdited = x.UserEdited }).ToArray();
             var text = new StringBuilder();
             text.AppendLine("Dual Recorder transcript");
             text.AppendLine("Status: " + state);

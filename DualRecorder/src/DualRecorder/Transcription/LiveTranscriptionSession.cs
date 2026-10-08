@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Text.Json;
 using SherpaOnnx;
 
 namespace DualRecorder.Transcription
@@ -12,6 +14,8 @@ namespace DualRecorder.Transcription
     {
         private readonly string _micPath, _systemPath, _models, _basePath;
         private readonly bool _onlyMe;
+        private readonly ConcurrentQueue<long> _micPauses = new ConcurrentQueue<long>();
+        private readonly ConcurrentQueue<long> _systemPauses = new ConcurrentQueue<long>();
         private readonly List<TranscriptEntry> _final = new List<TranscriptEntry>();
         private readonly object _entriesGate = new object();
         private volatile bool _stop, _paused, _finished;
@@ -32,8 +36,37 @@ namespace DualRecorder.Transcription
             _basePath = micPath.Substring(0, micPath.Length - "_mic-only.wav".Length);
             Speakers = new SpeakerRegistry(microphoneName, onlyMe);
         }
+        public static LiveTranscriptionSession LoadSaved(string jsonPath, string models)
+        {
+            const string suffix = "_transcript.json";
+            if (!jsonPath.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("Choose a DualRecorder transcript JSON file.");
+            string prefix = jsonPath.Substring(0, jsonPath.Length - suffix.Length);
+            var session = new LiveTranscriptionSession(prefix + "_mic-only.wav", prefix + "_system-only.wav", models, "You", false);
+            using var document = JsonDocument.Parse(File.ReadAllText(jsonPath));
+            var source = document.RootElement;
+            foreach (var person in source.GetProperty("speakers").Deserialize<SpeakerIdentity[]>()) session.Speakers.RestorePerson(person.Id, person.Name);
+            foreach (var entry in source.GetProperty("segments").Deserialize<TranscriptEntry[]>())
+            {
+                entry.SpeakerName = session.Speakers.Name(entry.SpeakerId);
+                entry.IsFinal = true;
+                session._final.Add(entry);
+            }
+            string status = source.GetProperty("status").GetString();
+            if (status != null && status.StartsWith("Incomplete:", StringComparison.OrdinalIgnoreCase)) session._failure = status.Substring(11).Trim();
+            session._finished = true;
+            return session;
+        }
         public void Start() => Completion = Task.Run(Run);
-        public void SetPaused(bool paused) => _paused = paused;
+        public void SetPaused(bool paused)
+        {
+            if (paused)
+            {
+                // Record exact audio boundaries so a quick resume cannot erase a queued pause.
+                _micPauses.Enqueue(Math.Max(0, (new FileInfo(_micPath).Length - 44) / 12));
+                _systemPauses.Enqueue(Math.Max(0, (new FileInfo(_systemPath).Length - 44) / 12));
+            }
+            _paused = paused;
+        }
         public void RequestStop() => _stop = true;
         public TranscriptEntry[] Entries { get { lock (_entriesGate) return _final.ToArray(); } }
         public void Save()
@@ -41,6 +74,59 @@ namespace DualRecorder.Transcription
             lock (_entriesGate) TranscriptExport.Save(_basePath, _final.ToArray(), Speakers,
                 _failure != null ? "Incomplete: " + _failure : _finished ? "Complete" : "Live snapshot");
         }
+
+        public void CorrectText(string entryId, string text)
+        {
+            lock (_entriesGate)
+            {
+                var entry = _final.FirstOrDefault(x => x.Id == entryId);
+                if (entry == null) throw new InvalidOperationException("Wait until this speech section is final before editing it.");
+                entry.Text = text ?? "";
+                entry.UserEdited = true;
+            }
+            if (_finished) Save();
+        }
+        public void AssignSpeaker(IEnumerable<string> entryIds, string speakerId)
+        {
+            if (!Speakers.Identities.Any(x => x.Id == speakerId)) throw new ArgumentException("Choose a named speaker.");
+            var ids = new HashSet<string>(entryIds);
+            lock (_entriesGate)
+                foreach (var entry in _final.Where(x => ids.Contains(x.Id)))
+                {
+                    entry.SpeakerId = speakerId;
+                    entry.SpeakerName = Speakers.Name(speakerId);
+                    entry.NeedsReview = false;
+                    entry.UserEdited = true;
+                }
+            if (_finished) Save();
+        }
+        public Task<bool> LearnSpeakerAsync(TranscriptEntry example, string speakerId) => Task.Run(() =>
+        {
+            if (example.End - example.Start < 1.5) return false;
+            string path = example.Source == "Microphone" ? _micPath : _systemPath;
+            if (!File.Exists(path)) return false;
+            using var reader = new GrowingWaveReader(path);
+            reader.SeekTo(example.Start);
+            var samples = new List<float>();
+            int maximum = (int)(Math.Min(15, example.End - example.Start) * 16000);
+            while (samples.Count < maximum)
+            {
+                var block = reader.ReadBlock(Math.Min(1600, maximum - samples.Count), true);
+                if (block.Length == 0) break;
+                samples.AddRange(block);
+            }
+            if (samples.Count < 24000) return false;
+            var config = new SpeakerEmbeddingExtractorConfig();
+            config.Model = Path.Combine(_models, "embedding.onnx");
+            config.NumThreads = 1;
+            using var extractor = new SpeakerEmbeddingExtractor(config);
+            using var stream = extractor.CreateStream();
+            stream.AcceptWaveform(16000, samples.ToArray());
+            stream.InputFinished();
+            if (!extractor.IsReady(stream)) return false;
+            Speakers.LearnVoice(speakerId, extractor.Compute(stream));
+            return true;
+        });
 
         private void Run()
         {
@@ -57,11 +143,12 @@ namespace DualRecorder.Transcription
                 config.ModelConfig.Tokens = Path.Combine(_models, "tokens.txt");
                 config.ModelConfig.NumThreads = 2;
                 config.ModelConfig.Provider = "cpu";
+                config.ModelConfig.ModelType = "zipformer2";
                 config.DecodingMethod = "greedy_search";
                 config.EnableEndpoint = 1;
                 config.Rule1MinTrailingSilence = 2.4f;
-                config.Rule2MinTrailingSilence = 0.8f;
-                config.Rule3MinUtteranceLength = 8;
+                config.Rule2MinTrailingSilence = 1.0f;
+                config.Rule3MinUtteranceLength = 12;
                 using var recognizer = new OnlineRecognizer(config);
                 using var segmenter = new SpeakerSegmenter(_models, Speakers);
                 using var mic = new Track(_micPath, "Microphone", _onlyMe, recognizer, segmenter, this);
@@ -110,6 +197,7 @@ namespace DualRecorder.Transcription
             private readonly LiveTranscriptionSession _owner;
             private readonly string _source;
             private readonly bool _onlyMe;
+            private readonly ConcurrentQueue<long> _pauses;
             private readonly List<float> _audio = new List<float>();
             private OnlineStream _stream;
             private string _lastText = "";
@@ -125,6 +213,7 @@ namespace DualRecorder.Transcription
                 _reader = new GrowingWaveReader(path);
                 _source = source;
                 _onlyMe = onlyMe;
+                _pauses = source == "Microphone" ? owner._micPauses : owner._systemPauses;
                 _recognizer = recognizer;
                 _segmenter = segmenter;
                 _owner = owner;
@@ -132,7 +221,13 @@ namespace DualRecorder.Transcription
             }
             public bool Read(bool stopping)
             {
-                var samples = _reader.ReadBlock(final: stopping);
+                while (_pauses.TryPeek(out var boundary) && boundary <= _reader.SamplesRead)
+                {
+                    Finish(true);
+                    _pauses.TryDequeue(out _);
+                }
+                int maximum = _pauses.TryPeek(out var next) ? (int)Math.Min(1600, Math.Max(1, next - _reader.SamplesRead)) : 1600;
+                var samples = _reader.ReadBlock(maximum, stopping);
                 if (samples.Length == 0) return false;
                 _audio.AddRange(samples);
                 _stream.AcceptWaveform(16000, samples);

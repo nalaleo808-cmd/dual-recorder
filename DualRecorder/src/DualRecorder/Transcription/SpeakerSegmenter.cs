@@ -38,6 +38,7 @@ namespace DualRecorder.Transcription
 
             var segments = audio.Length >= 16000 ? _diarizer.Process(audio) : Array.Empty<OfflineSpeakerDiarizationSegment>();
             var identities = new Dictionary<int, string>();
+            var assigned = new HashSet<string>();
             foreach (var group in segments.GroupBy(x => x.Speaker))
             {
                 var samples = new List<float>();
@@ -59,9 +60,10 @@ namespace DualRecorder.Transcription
                     using var stream = _extractor.CreateStream();
                     stream.AcceptWaveform(16000, samples.ToArray());
                     stream.InputFinished();
-                    if (_extractor.IsReady(stream)) speaker = _speakers.MatchOrAdd(_extractor.Compute(stream));
+                    if (_extractor.IsReady(stream)) speaker = _speakers.MatchOrAdd(_extractor.Compute(stream), assigned);
                 }
                 identities[group.Key] = speaker;
+                if (speaker != SpeakerRegistry.UnknownId) assigned.Add(speaker);
             }
 
             var words = TokenWords(tokens, timestamps, duration);

@@ -18,6 +18,13 @@ namespace DualRecorder.Transcription
             _input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         }
 
+        public void SeekTo(double seconds)
+        {
+            if (!double.IsFinite(seconds) || seconds < 0) throw new ArgumentOutOfRangeException(nameof(seconds));
+            SamplesRead = (long)(seconds * 16000);
+            _offset = 44 + SamplesRead * 12;
+        }
+
         public float[] ReadBlock(int maximumSamples = 1600, bool final = false)
         {
             if (!_headerChecked)
